@@ -1,0 +1,78 @@
+name: Measure iOS keyboard height
+
+on:
+  workflow_dispatch:
+
+jobs:
+  measure:
+    # Xcode 27 プレビュー用イメージ(arm64)。
+    # 使えない場合は xcode-27-xlarge(有料の larger runner)か macos-26 に変更
+    runs-on: xcode-27
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode / runtimes
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+          xcrun simctl list devicetypes | grep -i iphone
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project and build
+        run: |
+          xcodegen generate
+          xcodebuild \
+            -project KeyboardProbe.xcodeproj \
+            -scheme KeyboardProbe \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Measure keyboard height on each device
+        run: |
+          chmod +x scripts/measure.sh
+          APP="build/Build/Products/Debug-iphonesimulator/KeyboardProbe.app"
+          mkdir -p results
+          # 375pt幅: iPhone 13 mini / SE(3rd)、402pt幅(UIキットの基準): iPhone 17 Pro
+          while IFS= read -r DEVICE; do
+            [ -z "$DEVICE" ] && continue
+            echo "::group::$DEVICE"
+            scripts/measure.sh "$DEVICE" "$APP" results
+            echo "::endgroup::"
+          done <<'EOF'
+          iPhone 13 mini
+          iPhone SE (3rd generation)
+          iPhone 17 Pro
+          iPhone 17
+          EOF
+
+      - name: Summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import glob, json, os
+          rows = []
+          for f in sorted(glob.glob("results/*.json")):
+              d = json.load(open(f))
+              rows.append(d)
+          out = ["| device | iOS | width(pt) | keyboard(pt) | safe bottom(pt) | keyboard excl. safe(pt) |",
+                 "|---|---|---|---|---|---|"]
+          for d in rows:
+              out.append("| {device} | {ios_runtime} | {screen_width_pt} | {keyboard_frame_height_pt} | {safe_area_bottom_pt} | {keyboard_height_excluding_safe_area_pt} |".format(**d))
+          text = "\n".join(out) if rows else "No results produced."
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write(text + "\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: keyboard-results
+          path: results/
